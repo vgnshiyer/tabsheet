@@ -1,0 +1,497 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tabsheet</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #111111;
+    --dim: #999999;
+    --faint: #e5e5e5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111111; --fg: #e8e8e8; --dim: #777777; --faint: #2a2a2a; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 13px;
+  }
+  header {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    padding: 24px 32px 8px;
+  }
+  #title {
+    flex: 1;
+    min-width: 0;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--fg);
+    font: inherit;
+    font-size: 16px;
+    font-weight: 600;
+    padding: 0;
+  }
+  #title::placeholder { color: var(--dim); }
+  .btn {
+    border: 0;
+    background: transparent;
+    color: var(--dim);
+    font: inherit;
+    cursor: pointer;
+    padding: 2px 4px;
+  }
+  .btn:hover { color: var(--fg); }
+  main { padding: 8px 32px 0; }
+  .section {
+    position: relative;
+    padding: 10px 0;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+  .row { line-height: 1.5; }
+  .label { color: var(--dim); user-select: none; }
+  .cell { cursor: text; white-space: pre; }
+  .cell.cur {
+    background: var(--fg);
+    color: var(--bg);
+  }
+  .kill {
+    position: sticky;
+    right: 0;
+    float: right;
+    visibility: hidden;
+    color: var(--dim);
+  }
+  .section:hover .kill { visibility: visible; }
+  .kill:hover { color: var(--fg); }
+  footer {
+    padding: 20px 32px 32px;
+    color: var(--dim);
+    font-size: 11px;
+    line-height: 1.8;
+  }
+  kbd { color: var(--fg); }
+</style>
+</head>
+<body>
+<header>
+  <input id="title" placeholder="untitled" spellcheck="false" autocomplete="off">
+  <button class="btn" id="addBtn">+ line</button>
+  <button class="btn" id="copyBtn">copy</button>
+  <button class="btn" id="dlBtn">download</button>
+  <button class="btn" id="clearBtn">clear</button>
+</header>
+<main id="sheet"></main>
+<footer>
+  <kbd>0–9</kbd> fret (type two digits fast for 10+) &nbsp; <kbd>h p b r s t x ~ / \</kbd> technique &nbsp; <kbd>|</kbd> bar line &nbsp; <kbd>space</kbd> step &nbsp; <kbd>-</kbd> erase &amp; step<br>
+  <kbd>arrows</kbd> move &nbsp; <kbd>⌫</kbd> erase &nbsp; <kbd>enter</kbd> next line &nbsp; <kbd>⌘I</kbd> insert column &nbsp; <kbd>⌘⌫</kbd> delete column &nbsp; <kbd>⌘Z</kbd> undo
+</footer>
+<script>
+'use strict';
+
+const NSTR = 6;
+const LABELS = ['e', 'B', 'G', 'D', 'A', 'E'];
+const START_COLS = 32;
+const TECHNIQUES = new Set(['h', 'p', 'b', 'r', 's', 't', 'x', '~', '/', '\\']);
+const STORE_KEY = 'tabsheet.v1';
+const MAX_FRET = 24;
+
+const newSection = (cols = START_COLS) => ({
+  cells: Array.from({ length: NSTR }, () => Array(cols).fill(''))
+});
+
+let state = { title: '', sections: [newSection()] };
+let cur = { s: 0, str: 0, col: 0 };
+let undoStack = [];
+let redoStack = [];
+let lastDigit = null; // {s, str, col, time} for two-digit frets
+
+// ---------- persistence ----------
+
+function save() {
+  localStorage.setItem(STORE_KEY, JSON.stringify(state));
+}
+let saveTimer = null;
+function saveSoon() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(save, 300);
+}
+
+function load() {
+  try {
+    const raw = localStorage.getItem(STORE_KEY);
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    if (data && Array.isArray(data.sections) && data.sections.length) {
+      state = data;
+    }
+  } catch (_) { /* corrupted save: start fresh */ }
+}
+
+// ---------- undo ----------
+
+function snapshot() {
+  undoStack.push(JSON.stringify(state));
+  if (undoStack.length > 200) undoStack.shift();
+  redoStack = [];
+}
+
+function restore(json) {
+  state = JSON.parse(json);
+  titleInput.value = state.title || '';
+  clampCursor();
+  render();
+  saveSoon();
+}
+
+function undo() {
+  if (!undoStack.length) return;
+  redoStack.push(JSON.stringify(state));
+  restore(undoStack.pop());
+}
+
+function redo() {
+  if (!redoStack.length) return;
+  undoStack.push(JSON.stringify(state));
+  restore(redoStack.pop());
+}
+
+// ---------- model helpers ----------
+
+const ncols = sec => sec.cells[0].length;
+
+function clampCursor() {
+  cur.s = Math.min(cur.s, state.sections.length - 1);
+  cur.str = Math.max(0, Math.min(cur.str, NSTR - 1));
+  cur.col = Math.max(0, cur.col); // col may sit past ncols: those columns are virtual until written to
+}
+
+function isBarCol(sec, c) {
+  return sec.cells.every(row => row[c] === '|');
+}
+
+function colWidths(sec) {
+  const widths = [];
+  for (let c = 0; c < ncols(sec); c++) {
+    if (isBarCol(sec, c)) { widths.push(0); continue; } // bars render flush, no pad
+    let w = 1;
+    for (let r = 0; r < NSTR; r++) w = Math.max(w, sec.cells[r][c].length);
+    widths.push(w + 1); // at least one dash of separation
+  }
+  return widths;
+}
+
+function cellText(sec, r, c, w) {
+  const tok = sec.cells[r][c];
+  if (w === 0) return '|';
+  return tok ? tok.padEnd(w, '-') : '-'.repeat(w);
+}
+
+function extend(sec, n = 1) {
+  for (const row of sec.cells) for (let i = 0; i < n; i++) row.push('');
+}
+
+// ---------- render ----------
+
+const sheet = document.getElementById('sheet');
+
+function render() {
+  const scrolls = Array.from(sheet.children, d => d.scrollLeft);
+  sheet.textContent = '';
+  state.sections.forEach((sec, s) => {
+    const widths = colWidths(sec);
+    const n = s === cur.s ? Math.max(ncols(sec), cur.col + 1) : ncols(sec);
+    const div = document.createElement('div');
+    div.className = 'section';
+
+    const kill = document.createElement('button');
+    kill.className = 'btn kill';
+    kill.textContent = '×';
+    kill.title = 'delete line';
+    kill.dataset.s = s;
+    div.appendChild(kill);
+
+    for (let r = 0; r < NSTR; r++) {
+      const row = document.createElement('div');
+      row.className = 'row';
+      const label = document.createElement('span');
+      label.className = 'label';
+      label.textContent = LABELS[r] + '|';
+      row.appendChild(label);
+      for (let c = 0; c < n; c++) {
+        const cell = document.createElement('span');
+        cell.className = 'cell';
+        cell.textContent = c < ncols(sec) ? cellText(sec, r, c, widths[c]) : '--';
+        cell.dataset.s = s;
+        cell.dataset.r = r;
+        cell.dataset.c = c;
+        if (s === cur.s && r === cur.str && c === cur.col) cell.classList.add('cur');
+        row.appendChild(cell);
+      }
+      const end = document.createElement('span');
+      end.className = 'label';
+      end.textContent = '|';
+      row.appendChild(end);
+      div.appendChild(row);
+    }
+    sheet.appendChild(div);
+  });
+  Array.from(sheet.children).forEach((d, i) => { if (scrolls[i]) d.scrollLeft = scrolls[i]; });
+  const cc = sheet.querySelector('.cell.cur');
+  if (cc) cc.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
+
+// ---------- editing ----------
+
+function setCell(tok) {
+  const sec = state.sections[cur.s];
+  if (cur.col >= ncols(sec)) {
+    if (!tok) return;
+    extend(sec, cur.col - ncols(sec) + 1);
+  }
+  sec.cells[cur.str][cur.col] = tok;
+}
+
+// a bar is all-or-nothing: writing over any bar cell clears the whole column first
+function unbar() {
+  const sec = state.sections[cur.s];
+  if (cur.col < ncols(sec) && isBarCol(sec, cur.col)) {
+    for (let r = 0; r < NSTR; r++) sec.cells[r][cur.col] = '';
+  }
+}
+
+function erase() {
+  const sec = state.sections[cur.s];
+  const bar = cur.col < ncols(sec) && isBarCol(sec, cur.col);
+  const tok = cur.col < ncols(sec) ? sec.cells[cur.str][cur.col] : '';
+  if (!tok && !bar) return;
+  snapshot();
+  if (bar) unbar();
+  else setCell('');
+}
+
+function moveRight() {
+  cur.col++;
+}
+
+function moveLeft() {
+  if (cur.col > 0) cur.col--;
+}
+
+function moveDown() {
+  if (cur.str < NSTR - 1) {
+    cur.str++;
+  } else if (cur.s < state.sections.length - 1) {
+    cur.s++;
+    cur.str = 0;
+    clampCursor();
+  }
+}
+
+function moveUp() {
+  if (cur.str > 0) {
+    cur.str--;
+  } else if (cur.s > 0) {
+    cur.s--;
+    cur.str = NSTR - 1;
+    clampCursor();
+  }
+}
+
+function typeDigit(d) {
+  const now = Date.now();
+  const tok = state.sections[cur.s].cells[cur.str][cur.col];
+  const combinable =
+    lastDigit &&
+    lastDigit.s === cur.s && lastDigit.str === cur.str && lastDigit.col === cur.col &&
+    now - lastDigit.time < 700 &&
+    /^[12]$/.test(tok) &&
+    parseInt(tok + d, 10) <= MAX_FRET;
+  snapshot();
+  unbar();
+  setCell(combinable ? tok + d : d);
+  lastDigit = { s: cur.s, str: cur.str, col: cur.col, time: now };
+}
+
+function insertBar() {
+  snapshot();
+  const sec = state.sections[cur.s];
+  if (cur.col >= ncols(sec)) extend(sec, cur.col - ncols(sec) + 1);
+  for (let r = 0; r < NSTR; r++) sec.cells[r][cur.col] = '|';
+  moveRight();
+}
+
+function insertCol() {
+  const sec = state.sections[cur.s];
+  if (cur.col >= ncols(sec)) return;
+  snapshot();
+  for (const row of sec.cells) row.splice(cur.col, 0, '');
+}
+
+function deleteCol() {
+  const sec = state.sections[cur.s];
+  if (ncols(sec) <= 1 || cur.col >= ncols(sec)) return;
+  snapshot();
+  for (const row of sec.cells) row.splice(cur.col, 1);
+}
+
+function addSection(after = state.sections.length - 1) {
+  snapshot();
+  state.sections.splice(after + 1, 0, newSection());
+  cur = { s: after + 1, str: cur.str, col: 0 };
+}
+
+function deleteSection(s) {
+  snapshot();
+  state.sections.splice(s, 1);
+  if (!state.sections.length) state.sections.push(newSection());
+  if (s < cur.s) cur.s--;
+  clampCursor();
+}
+
+// ---------- export ----------
+
+function toText() {
+  let out = state.title.trim() ? state.title.trim() + '\n\n' : '';
+  for (const sec of state.sections) {
+    const widths = colWidths(sec);
+    for (let r = 0; r < NSTR; r++) {
+      let line = LABELS[r] + '|';
+      for (let c = 0; c < ncols(sec); c++) line += cellText(sec, r, c, widths[c]);
+      out += line + '|\n';
+    }
+    out += '\n';
+  }
+  return out;
+}
+
+// ---------- events ----------
+
+const titleInput = document.getElementById('title');
+titleInput.addEventListener('input', () => {
+  state.title = titleInput.value;
+  saveSoon();
+});
+
+sheet.addEventListener('mousedown', e => {
+  const t = e.target;
+  if (t.classList.contains('cell')) {
+    titleInput.blur();
+    cur = { s: +t.dataset.s, str: +t.dataset.r, col: +t.dataset.c };
+    lastDigit = null;
+    render();
+    e.preventDefault();
+  }
+});
+
+sheet.addEventListener('click', e => {
+  if (e.target.classList.contains('kill')) {
+    deleteSection(+e.target.dataset.s);
+    render();
+    saveSoon();
+  }
+});
+
+document.getElementById('addBtn').addEventListener('click', () => {
+  addSection();
+  render();
+  saveSoon();
+});
+
+document.getElementById('copyBtn').addEventListener('click', async e => {
+  await navigator.clipboard.writeText(toText());
+  const btn = e.target;
+  btn.textContent = 'copied';
+  setTimeout(() => { btn.textContent = 'copy'; }, 1200);
+});
+
+document.getElementById('dlBtn').addEventListener('click', () => {
+  const slug = state.title.trim().replace(/[^\w-]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase();
+  const name = slug || 'tab';
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([toText()], { type: 'text/plain' }));
+  a.download = name + '.txt';
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+
+document.getElementById('clearBtn').addEventListener('click', () => {
+  if (!confirm('Clear everything?')) return;
+  snapshot();
+  state = { title: '', sections: [newSection()] };
+  cur = { s: 0, str: 0, col: 0 };
+  titleInput.value = '';
+  render();
+  save();
+});
+
+document.addEventListener('keydown', e => {
+  if (e.target === titleInput) {
+    if (e.key === 'Enter' || e.key === 'Escape') titleInput.blur();
+    return;
+  }
+
+  const mod = e.metaKey || e.ctrlKey;
+  if (mod) {
+    lastDigit = null; // undo/redo/column edits can change the cell under the cursor
+    const k = e.key.toLowerCase();
+    if (k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
+    else if (k === 'y') { e.preventDefault(); redo(); }
+    else if (k === 'i') { e.preventDefault(); insertCol(); render(); saveSoon(); }
+    else if (e.key === 'Backspace') { e.preventDefault(); deleteCol(); render(); saveSoon(); }
+    return; // let other browser shortcuts through
+  }
+  if (e.altKey) return;
+
+  let handled = true;
+  const k = e.key;
+
+  if (k === 'ArrowRight') { moveRight(); lastDigit = null; }
+  else if (k === 'ArrowLeft') { moveLeft(); lastDigit = null; }
+  else if (k === 'ArrowDown') { moveDown(); lastDigit = null; }
+  else if (k === 'ArrowUp') { moveUp(); lastDigit = null; }
+  else if (k === ' ') { moveRight(); lastDigit = null; }
+  else if (k === '-') { erase(); moveRight(); lastDigit = null; }
+  else if (k === 'Backspace') { erase(); moveLeft(); lastDigit = null; }
+  else if (k === 'Delete') { erase(); lastDigit = null; }
+  else if (k === 'Enter') {
+    if (cur.s === state.sections.length - 1) addSection();
+    else { cur.s++; cur.col = 0; clampCursor(); }
+    lastDigit = null;
+  }
+  else if (k === '|') { insertBar(); lastDigit = null; }
+  else if (/^[0-9]$/.test(k)) { typeDigit(k); }
+  else if (TECHNIQUES.has(k.toLowerCase())) { snapshot(); unbar(); setCell(k.toLowerCase()); lastDigit = null; }
+  else handled = false;
+
+  if (handled) {
+    e.preventDefault();
+    render();
+    saveSoon();
+  }
+});
+
+window.addEventListener('pagehide', save);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') save();
+});
+
+// ---------- init ----------
+
+load();
+titleInput.value = state.title || '';
+clampCursor();
+render();
+</script>
+</body>
+</html>
