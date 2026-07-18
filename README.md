@@ -18,4 +18,7 @@ Click a cell (or just start typing) and enter frets as you play:
 - `⌘Z` / `Ctrl+Z` — undo, `⇧⌘Z` / `Ctrl+Y` — redo
 
 Everything autosaves to localStorage. **copy** / **download** export standard ASCII tab
-(`e|---5-7---|` format). Hover a line to reveal **×** to delete it.
+(`e|---5-7---|` format). Hover a line to reveal **× ** (delete it) and **+ note** — a
+free-text line above the tab line for section labels and directions ("chorus",
+"repeat first 4 measures ×2"). Notes export as plain text lines; an emptied note
+removes itself.

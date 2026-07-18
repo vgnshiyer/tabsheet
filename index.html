@@ -65,15 +65,28 @@
     background: var(--fg);
     color: var(--bg);
   }
-  .kill {
+  .secbtn {
     position: sticky;
     right: 0;
     float: right;
     visibility: hidden;
     color: var(--dim);
+    margin-left: 8px;
   }
-  .section:hover .kill { visibility: visible; }
-  .kill:hover { color: var(--fg); }
+  .section:hover .secbtn { visibility: visible; }
+  .secbtn:hover { color: var(--fg); }
+  .note {
+    display: block;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--dim);
+    font: inherit;
+    font-size: 12px;
+    padding: 0 0 4px;
+    width: 60%;
+  }
+  .note::placeholder { color: var(--dim); opacity: 0.5; }
   footer {
     padding: 20px 32px 32px;
     color: var(--dim);
@@ -215,11 +228,28 @@ function render() {
     div.className = 'section';
 
     const kill = document.createElement('button');
-    kill.className = 'btn kill';
+    kill.className = 'btn secbtn kill';
     kill.textContent = '×';
     kill.title = 'delete line';
     kill.dataset.s = s;
     div.appendChild(kill);
+
+    if (sec.note === undefined) {
+      const nb = document.createElement('button');
+      nb.className = 'btn secbtn addnote';
+      nb.textContent = '+ note';
+      nb.title = 'add a text note above this line';
+      nb.dataset.s = s;
+      div.appendChild(nb);
+    } else {
+      const note = document.createElement('input');
+      note.className = 'note';
+      note.value = sec.note;
+      note.placeholder = 'note — e.g. chorus, repeat first 4 measures ×2';
+      note.spellcheck = false;
+      note.dataset.s = s;
+      div.appendChild(note);
+    }
 
     for (let r = 0; r < NSTR; r++) {
       const row = document.createElement('div');
@@ -364,6 +394,7 @@ function deleteSection(s) {
 function toText() {
   let out = state.title.trim() ? state.title.trim() + '\n\n' : '';
   for (const sec of state.sections) {
+    if (sec.note && sec.note.trim()) out += sec.note.trim() + '\n';
     const widths = colWidths(sec);
     for (let r = 0; r < NSTR; r++) {
       let line = LABELS[r] + '|';
@@ -386,7 +417,7 @@ titleInput.addEventListener('input', () => {
 sheet.addEventListener('mousedown', e => {
   const t = e.target;
   if (t.classList.contains('cell')) {
-    titleInput.blur();
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     cur = { s: +t.dataset.s, str: +t.dataset.r, col: +t.dataset.c };
     lastDigit = null;
     render();
@@ -397,6 +428,27 @@ sheet.addEventListener('mousedown', e => {
 sheet.addEventListener('click', e => {
   if (e.target.classList.contains('kill')) {
     deleteSection(+e.target.dataset.s);
+    render();
+    saveSoon();
+  } else if (e.target.classList.contains('addnote')) {
+    const s = +e.target.dataset.s;
+    state.sections[s].note = '';
+    render();
+    const inp = sheet.children[s] && sheet.children[s].querySelector('.note');
+    if (inp) inp.focus();
+  }
+});
+
+sheet.addEventListener('input', e => {
+  if (e.target.classList.contains('note')) {
+    state.sections[+e.target.dataset.s].note = e.target.value;
+    saveSoon();
+  }
+});
+
+sheet.addEventListener('focusout', e => {
+  if (e.target.classList.contains('note') && !e.target.value.trim()) {
+    delete state.sections[+e.target.dataset.s].note;
     render();
     saveSoon();
   }
@@ -436,8 +488,8 @@ document.getElementById('clearBtn').addEventListener('click', () => {
 });
 
 document.addEventListener('keydown', e => {
-  if (e.target === titleInput) {
-    if (e.key === 'Enter' || e.key === 'Escape') titleInput.blur();
+  if (e.target instanceof HTMLInputElement) {
+    if (e.key === 'Enter' || e.key === 'Escape') e.target.blur();
     return;
   }
 
